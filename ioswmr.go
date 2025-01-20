@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"io"
 	"os"
-	"sync/atomic"
+	"sync"
 )
 
 // SWMR is a single-writer-multiple-reader interface
@@ -22,10 +22,10 @@ type Buffer interface {
 }
 
 type swmr struct {
+	mut      sync.RWMutex
 	buf      Buffer
-	isClosed atomic.Bool
-
-	length int
+	isClosed bool
+	length   int
 
 	ch chan struct{}
 }
@@ -51,7 +51,9 @@ func NewSWMR(buf Buffer) SWMR {
 }
 
 func (m *swmr) Write(p []byte) (n int, err error) {
-	if m.isClosed.Load() {
+	m.mut.Lock()
+	defer m.mut.Unlock()
+	if m.isClosed {
 		return 0, io.ErrClosedPipe
 	}
 	if len(p) == 0 {
@@ -59,17 +61,25 @@ func (m *swmr) Write(p []byte) (n int, err error) {
 	}
 
 	n, err = m.buf.Write(p)
-	m.length += n
-	m.targetNotify()
+	if n > 0 {
+		m.length += n
+		m.targetNotify()
+	}
 	return n, err
 }
 
 func (m *swmr) Len() int {
+	m.mut.RLock()
+	defer m.mut.RUnlock()
 	return m.length
 }
 
 func (m *swmr) Close() error {
-	if !m.isClosed.Swap(true) {
+	m.mut.Lock()
+	defer m.mut.Unlock()
+
+	if !m.isClosed {
+		m.isClosed = true
 		close(m.ch)
 	}
 	return nil
@@ -106,7 +116,9 @@ func (m *reader) Read(p []byte) (n int, err error) {
 		}
 	}
 
+	m.swmr.mut.RLock()
 	n, err = m.swmr.buf.ReadAt(p, int64(m.off))
+	m.swmr.mut.RUnlock()
 	if err != nil {
 		if err == io.EOF {
 			if n != 0 {
@@ -158,13 +170,7 @@ func (f *file) Write(p []byte) (n int, err error) {
 }
 
 func (f *file) ReadAt(p []byte, off int64) (n int, err error) {
-	r, err := os.Open(f.f.Name())
-	if err != nil {
-		return 0, err
-	}
-	defer r.Close()
-
-	n, err = r.ReadAt(p, off)
+	n, err = f.f.ReadAt(p, off)
 	if err != nil {
 		if err == io.EOF && n != 0 {
 			err = nil

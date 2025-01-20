@@ -1,8 +1,10 @@
 package ioswmr
 
 import (
+	"bytes"
 	"io"
 	"os"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -12,7 +14,9 @@ func TestMemory(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		testCase(t, nil)
+		testBaseCase(t, nil)
+		testClose(t, nil)
+		testConcurrentReads(t, nil)
 	}()
 
 	select {
@@ -33,7 +37,11 @@ func TestFile(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		testCase(t, f)
+		testBaseCase(t, f)
+		f.Seek(0, 0)
+		testClose(t, f)
+		f.Seek(0, 0)
+		testConcurrentReads(t, f)
 	}()
 
 	select {
@@ -43,7 +51,7 @@ func TestFile(t *testing.T) {
 	}
 }
 
-func testCase(t *testing.T, buf Buffer) {
+func testBaseCase(t *testing.T, buf Buffer) {
 	m := NewSWMR(buf)
 	var times atomic.Uint32
 
@@ -101,4 +109,52 @@ func testCase(t *testing.T, buf Buffer) {
 	for times.Load() != 18 {
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+func testClose(t *testing.T, buf Buffer) {
+	m := NewSWMR(buf)
+	defer m.Close()
+
+	if err := m.Close(); err != nil {
+		t.Fatalf("Close failed: %s", err)
+	}
+
+	_, err := m.Write([]byte("Data after close"))
+	if err != io.ErrClosedPipe {
+		t.Errorf("Expected ErrClosedPipe, got %v", err)
+	}
+}
+
+func testConcurrentReads(t *testing.T, buf Buffer) {
+	m := NewSWMR(buf)
+	defer m.Close()
+
+	data := bytes.Repeat([]byte("Concurrent Read Data! "), 1024*100)
+
+	var wg sync.WaitGroup
+
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			readBuf := make([]byte, len(data))
+			n, err := io.ReadFull(m.NewReader(), readBuf)
+			if err != nil && err != io.EOF {
+				t.Errorf("Concurrent read failed: %s", err)
+			}
+			if n != len(data) {
+				t.Errorf("Expected to read %d bytes, got %d", len(data), n)
+			}
+			if string(readBuf) != string(data) {
+				t.Errorf("Expected %q, got %q", data, readBuf)
+			}
+		}()
+	}
+
+	_, err := m.Write(data)
+	if err != nil {
+		t.Fatalf("Write failed: %s", err)
+	}
+
+	wg.Wait()
 }
