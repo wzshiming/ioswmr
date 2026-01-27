@@ -13,6 +13,7 @@ type SWMR interface {
 	io.Writer
 	io.Closer
 	NewReader() io.Reader
+	NewReaderWithOffset(offset int) io.Reader
 }
 
 // Buffer is an interface that represents a buffer.
@@ -98,6 +99,13 @@ func (m *swmr) targetNotify() {
 func (m *swmr) NewReader() io.Reader {
 	return &reader{
 		swmr: m,
+	}
+}
+
+func (m *swmr) NewReaderWithOffset(offset int) io.Reader {
+	return &reader{
+		swmr: m,
+		off:  offset,
 	}
 }
 
