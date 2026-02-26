@@ -2,6 +2,7 @@ package ioswmr
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"os"
 	"sync"
@@ -14,6 +15,7 @@ type SWMR interface {
 	io.Closer
 	NewReader() io.Reader
 	NewReaderWithOffset(offset int) io.Reader
+	NewReadSeeker(offset int, length int) io.ReadSeeker
 }
 
 // Buffer is an interface that represents a buffer.
@@ -109,38 +111,102 @@ func (m *swmr) NewReaderWithOffset(offset int) io.Reader {
 	}
 }
 
+func (m *swmr) NewReadSeeker(offset int, length int) io.ReadSeeker {
+	return &readSeeker{
+		swmr:   m,
+		off:    offset,
+		length: length,
+	}
+}
+
 type reader struct {
 	swmr *swmr
 	off  int
 }
 
 func (m *reader) Read(p []byte) (n int, err error) {
-	if m.off >= m.swmr.Len() {
+	for m.off >= m.swmr.Len() {
 		_, ok := <-m.swmr.ch
 		if !ok {
 			if m.off >= m.swmr.Len() {
 				return 0, io.EOF
 			}
+			break
 		}
 	}
 
 	m.swmr.mut.RLock()
 	n, err = m.swmr.buf.ReadAt(p, int64(m.off))
 	m.swmr.mut.RUnlock()
-	if err != nil {
-		if err == io.EOF {
-			if n != 0 {
-				err = nil
-			} else {
-				_, ok := <-m.swmr.ch
-				if !ok && m.off < m.swmr.Len() {
-					n, err = m.swmr.buf.ReadAt(p, int64(m.off))
-				}
-			}
+	if err == io.EOF {
+		if n != 0 {
+			err = nil
 		}
 	}
 	m.off += n
 	return n, err
+}
+
+type readSeeker struct {
+	swmr   *swmr
+	off    int
+	length int
+}
+
+func (m *readSeeker) Read(p []byte) (n int, err error) {
+	if m.off >= m.length {
+		return 0, io.EOF
+	}
+
+	for m.off >= m.swmr.Len() {
+		_, ok := <-m.swmr.ch
+		if !ok {
+			if m.off >= m.swmr.Len() {
+				return 0, io.ErrUnexpectedEOF
+			}
+			break
+		}
+	}
+
+	remaining := m.length - m.off
+	if len(p) > remaining {
+		p = p[:remaining]
+	}
+
+	m.swmr.mut.RLock()
+	n, err = m.swmr.buf.ReadAt(p, int64(m.off))
+	m.swmr.mut.RUnlock()
+	if err == io.EOF {
+		if n != 0 {
+			err = nil
+		} else {
+			err = io.ErrUnexpectedEOF
+		}
+	}
+	m.off += n
+	return n, err
+}
+
+func (m *readSeeker) Seek(offset int64, whence int) (int64, error) {
+	var newPos int64
+	switch whence {
+	case io.SeekStart:
+		newPos = offset
+	case io.SeekCurrent:
+		newPos = int64(m.off) + offset
+	case io.SeekEnd:
+		newPos = int64(m.length) + offset
+	default:
+		return int64(m.off), errors.New("ioswmr: invalid whence")
+	}
+	if newPos < 0 {
+		return int64(m.off), errors.New("ioswmr: negative position")
+	}
+	if newPos > int64(m.length) {
+		return int64(m.off), errors.New("ioswmr: position beyond length")
+	}
+	m.off = int(newPos)
+	return newPos, nil
 }
 
 type memory struct {
