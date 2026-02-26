@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"errors"
 	"io"
-	"os"
 	"sync"
 )
 
@@ -38,11 +37,6 @@ type swmr struct {
 func NewSWMR(buf Buffer) SWMR {
 	if buf == nil {
 		buf = &memory{}
-	} else {
-		switch t := buf.(type) {
-		case *os.File:
-			buf = &file{f: t}
-		}
 	}
 
 	m := &swmr{
@@ -224,33 +218,5 @@ func (m *memory) ReadAt(p []byte, off int64) (n int, err error) {
 	}
 
 	n = copy(p, buf[off:])
-	return n, nil
-}
-
-type file struct {
-	f *os.File
-}
-
-func (f *file) Write(p []byte) (n int, err error) {
-	n, err = f.f.Write(p)
-	if err != nil {
-		return n, err
-	}
-	err = f.f.Sync()
-	if err != nil {
-		return n, err
-	}
-	return n, nil
-}
-
-func (f *file) ReadAt(p []byte, off int64) (n int, err error) {
-	n, err = f.f.ReadAt(p, off)
-	if err != nil {
-		if err == io.EOF && n != 0 {
-			err = nil
-		} else {
-			return n, err
-		}
-	}
 	return n, nil
 }
