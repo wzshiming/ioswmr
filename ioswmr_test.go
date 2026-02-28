@@ -73,11 +73,13 @@ func testBaseCase(t *testing.T, buf Buffer) {
 	var times atomic.Uint32
 
 	bufs := [][]byte{}
+	var mut sync.Mutex
 
 	testFunc := func(mark string) {
 		buf := make([]byte, 12)
+		mut.Lock()
 		bufs = append(bufs, buf)
-
+		mut.Unlock()
 		n, err := io.ReadFull(m.NewReader(0), buf)
 		if err != nil {
 			t.Errorf("on %q: %s", mark, err)
