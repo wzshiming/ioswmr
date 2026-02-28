@@ -1,7 +1,6 @@
 package ioswmr
 
 import (
-	"bytes"
 	"errors"
 	"io"
 	"sync"
@@ -198,19 +197,19 @@ func (m *readSeeker) Seek(offset int64, whence int) (int64, error) {
 }
 
 type memory struct {
-	buf bytes.Buffer
+	buf []byte
 }
 
 func (m *memory) Write(p []byte) (n int, err error) {
-	return m.buf.Write(p)
+	m.buf = append(m.buf, p...)
+	return len(p), nil
 }
 
 func (m *memory) ReadAt(p []byte, off int64) (n int, err error) {
-	buf := m.buf.Bytes()
-	if off >= int64(len(buf)) {
+	if off >= int64(len(m.buf)) {
 		return 0, io.EOF
 	}
 
-	n = copy(p, buf[off:])
+	n = copy(p, m.buf[off:])
 	return n, nil
 }
