@@ -12,8 +12,8 @@ import (
 type SWMR interface {
 	io.Writer
 	io.Closer
-	NewReader() io.Reader
-	NewReaderWithOffset(offset int) io.Reader
+	Length() int
+	NewReader(offset int) io.Reader
 	NewReadSeeker(offset int, length int) io.ReadSeeker
 }
 
@@ -65,7 +65,7 @@ func (m *swmr) Write(p []byte) (n int, err error) {
 	return n, err
 }
 
-func (m *swmr) Len() int {
+func (m *swmr) Length() int {
 	m.mut.RLock()
 	defer m.mut.RUnlock()
 	return m.length
@@ -92,13 +92,7 @@ func (m *swmr) targetNotify() {
 	}
 }
 
-func (m *swmr) NewReader() io.Reader {
-	return &reader{
-		swmr: m,
-	}
-}
-
-func (m *swmr) NewReaderWithOffset(offset int) io.Reader {
+func (m *swmr) NewReader(offset int) io.Reader {
 	return &reader{
 		swmr: m,
 		off:  offset,
@@ -119,10 +113,10 @@ type reader struct {
 }
 
 func (m *reader) Read(p []byte) (n int, err error) {
-	for m.off >= m.swmr.Len() {
+	for m.off >= m.swmr.Length() {
 		_, ok := <-m.swmr.ch
 		if !ok {
-			if m.off >= m.swmr.Len() {
+			if m.off >= m.swmr.Length() {
 				return 0, io.EOF
 			}
 			break
@@ -152,10 +146,10 @@ func (m *readSeeker) Read(p []byte) (n int, err error) {
 		return 0, io.EOF
 	}
 
-	for m.off >= m.swmr.Len() {
+	for m.off >= m.swmr.Length() {
 		_, ok := <-m.swmr.ch
 		if !ok {
-			if m.off >= m.swmr.Len() {
+			if m.off >= m.swmr.Length() {
 				return 0, io.ErrUnexpectedEOF
 			}
 			break

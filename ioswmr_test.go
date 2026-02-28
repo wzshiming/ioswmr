@@ -78,7 +78,7 @@ func testBaseCase(t *testing.T, buf Buffer) {
 		buf := make([]byte, 12)
 		bufs = append(bufs, buf)
 
-		n, err := io.ReadFull(m.NewReader(), buf)
+		n, err := io.ReadFull(m.NewReader(0), buf)
 		if err != nil {
 			t.Errorf("on %q: %s", mark, err)
 		}
@@ -155,7 +155,7 @@ func testConcurrentReads(t *testing.T, buf Buffer) {
 		go func() {
 			defer wg.Done()
 			readBuf := make([]byte, len(data))
-			n, err := io.ReadFull(m.NewReader(), readBuf)
+			n, err := io.ReadFull(m.NewReader(0), readBuf)
 			if err != nil && err != io.EOF {
 				t.Errorf("Concurrent read failed: %s", err)
 			}
