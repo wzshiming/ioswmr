@@ -14,6 +14,7 @@ type SWMR interface {
 	io.Closer
 	Length() int
 	Using() int
+	IsClosed() bool
 	NewReader(offset int) io.ReadCloser
 	NewReadSeeker(offset int, length int) io.ReadSeekCloser
 }
@@ -84,6 +85,10 @@ func (m *swmr) Length() int {
 
 func (m *swmr) Using() int {
 	return int(m.using.Load())
+}
+
+func (m *swmr) IsClosed() bool {
+	return m.isClosed.Load()
 }
 
 func (m *swmr) Close() error {
