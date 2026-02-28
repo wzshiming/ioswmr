@@ -4,16 +4,18 @@ import (
 	"errors"
 	"io"
 	"sync"
+	"sync/atomic"
 )
 
 // SWMR is a single-writer-multiple-reader interface
 // that allows for a single writer and multiple readers to access the same stream.
 type SWMR interface {
-	io.Writer
+	Buffer
 	io.Closer
 	Length() int
-	NewReader(offset int) io.Reader
-	NewReadSeeker(offset int, length int) io.ReadSeeker
+	Using() int
+	NewReader(offset int) io.ReadCloser
+	NewReadSeeker(offset int, length int) io.ReadSeekCloser
 }
 
 // Buffer is an interface that represents a buffer.
@@ -25,8 +27,9 @@ type Buffer interface {
 type swmr struct {
 	mut      sync.RWMutex
 	buf      Buffer
-	isClosed bool
+	isClosed atomic.Bool
 	length   int
+	using    atomic.Int64
 
 	ch chan struct{}
 }
@@ -47,21 +50,30 @@ func NewSWMR(buf Buffer) SWMR {
 }
 
 func (m *swmr) Write(p []byte) (n int, err error) {
-	m.mut.Lock()
-	defer m.mut.Unlock()
-	if m.isClosed {
+	if m.isClosed.Load() {
 		return 0, io.ErrClosedPipe
 	}
 	if len(p) == 0 {
 		return 0, nil
 	}
 
+	m.mut.Lock()
 	n, err = m.buf.Write(p)
 	if n > 0 {
 		m.length += n
+	}
+	m.mut.Unlock()
+
+	if n > 0 {
 		m.targetNotify()
 	}
 	return n, err
+}
+
+func (m *swmr) ReadAt(p []byte, off int64) (n int, err error) {
+	m.mut.RLock()
+	defer m.mut.RUnlock()
+	return m.buf.ReadAt(p, off)
 }
 
 func (m *swmr) Length() int {
@@ -70,19 +82,20 @@ func (m *swmr) Length() int {
 	return m.length
 }
 
-func (m *swmr) Close() error {
-	m.mut.Lock()
-	defer m.mut.Unlock()
+func (m *swmr) Using() int {
+	return int(m.using.Load())
+}
 
-	if !m.isClosed {
-		m.isClosed = true
-		close(m.ch)
+func (m *swmr) Close() error {
+	if m.isClosed.Swap(true) {
+		return io.ErrClosedPipe
 	}
+	close(m.ch)
 	return nil
 }
 
 func (m *swmr) targetNotify() {
-	for {
+	for i := 0; i < m.Length(); i++ {
 		select {
 		case m.ch <- struct{}{}:
 		default:
@@ -91,14 +104,24 @@ func (m *swmr) targetNotify() {
 	}
 }
 
-func (m *swmr) NewReader(offset int) io.Reader {
+func (m *swmr) acquire() {
+	_ = m.using.Add(1)
+}
+
+func (m *swmr) release() {
+	_ = m.using.Add(-1)
+}
+
+func (m *swmr) NewReader(offset int) io.ReadCloser {
+	m.acquire()
 	return &reader{
 		swmr: m,
 		off:  offset,
 	}
 }
 
-func (m *swmr) NewReadSeeker(offset int, length int) io.ReadSeeker {
+func (m *swmr) NewReadSeeker(offset int, length int) io.ReadSeekCloser {
+	m.acquire()
 	return &readSeeker{
 		swmr:   m,
 		off:    offset,
@@ -122,9 +145,7 @@ func (m *reader) Read(p []byte) (n int, err error) {
 		}
 	}
 
-	m.swmr.mut.RLock()
-	n, err = m.swmr.buf.ReadAt(p, int64(m.off))
-	m.swmr.mut.RUnlock()
+	n, err = m.swmr.ReadAt(p, int64(m.off))
 	if err == io.EOF {
 		if n != 0 {
 			err = nil
@@ -132,6 +153,11 @@ func (m *reader) Read(p []byte) (n int, err error) {
 	}
 	m.off += n
 	return n, err
+}
+
+func (m *reader) Close() error {
+	m.swmr.release()
+	return nil
 }
 
 type readSeeker struct {
@@ -160,9 +186,7 @@ func (m *readSeeker) Read(p []byte) (n int, err error) {
 		p = p[:remaining]
 	}
 
-	m.swmr.mut.RLock()
-	n, err = m.swmr.buf.ReadAt(p, int64(m.off))
-	m.swmr.mut.RUnlock()
+	n, err = m.swmr.ReadAt(p, int64(m.off))
 	if err == io.EOF {
 		if n != 0 {
 			err = nil
@@ -194,6 +218,11 @@ func (m *readSeeker) Seek(offset int64, whence int) (int64, error) {
 	}
 	m.off = int(newPos)
 	return newPos, nil
+}
+
+func (m *readSeeker) Close() error {
+	m.swmr.release()
+	return nil
 }
 
 type memory struct {

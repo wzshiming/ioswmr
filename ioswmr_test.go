@@ -80,7 +80,10 @@ func testBaseCase(t *testing.T, buf Buffer) {
 		mut.Lock()
 		bufs = append(bufs, buf)
 		mut.Unlock()
-		n, err := io.ReadFull(m.NewReader(0), buf)
+
+		reader := m.NewReader(0)
+		defer reader.Close()
+		n, err := io.ReadFull(reader, buf)
 		if err != nil {
 			t.Errorf("on %q: %s", mark, err)
 		}
@@ -128,6 +131,9 @@ func testBaseCase(t *testing.T, buf Buffer) {
 	for times.Load() != 18 {
 		time.Sleep(10 * time.Millisecond)
 	}
+	if m.Using() != 0 {
+		t.Errorf("Expected Using() to be 0 after all readers are done, got %d", m.Using())
+	}
 }
 
 func testClose(t *testing.T, buf Buffer) {
@@ -157,7 +163,9 @@ func testConcurrentReads(t *testing.T, buf Buffer) {
 		go func() {
 			defer wg.Done()
 			readBuf := make([]byte, len(data))
-			n, err := io.ReadFull(m.NewReader(0), readBuf)
+			reader := m.NewReader(0)
+			defer reader.Close()
+			n, err := io.ReadFull(reader, readBuf)
 			if err != nil && err != io.EOF {
 				t.Errorf("Concurrent read failed: %s", err)
 			}
@@ -176,6 +184,10 @@ func testConcurrentReads(t *testing.T, buf Buffer) {
 	}
 
 	wg.Wait()
+
+	if m.Using() != 0 {
+		t.Errorf("Expected Using() to be 0 after all readers are done, got %d", m.Using())
+	}
 }
 
 func testConcurrentReadSeekers(t *testing.T, buf Buffer) {
