@@ -30,12 +30,14 @@ type SWMR interface {
 }
 
 type swmr struct {
-	mut       sync.RWMutex
-	buf       Buffer
-	isClosed  atomic.Bool
-	length    int
-	using     atomic.Int64
-	autoClose bool
+	mut             sync.RWMutex
+	buf             Buffer
+	isClosed        atomic.Bool
+	length          int
+	using           atomic.Int64
+	autoClose       bool
+	beforeCloseFunc func()
+	afterCloseFunc  func(err error) error
 
 	ch chan struct{}
 }
@@ -47,6 +49,20 @@ type Option func(*swmr)
 func WithAutoClose() Option {
 	return func(m *swmr) {
 		m.autoClose = true
+	}
+}
+
+// WithBeforeCloseFunc sets a function to be called before the buffer is closed.
+func WithBeforeCloseFunc(f func()) Option {
+	return func(m *swmr) {
+		m.beforeCloseFunc = f
+	}
+}
+
+// WithAfterCloseFunc sets a function to be called after the buffer is closed, allowing for error handling or cleanup based on the result of the close operation.
+func WithAfterCloseFunc(f func(err error) error) Option {
+	return func(m *swmr) {
+		m.afterCloseFunc = f
 	}
 }
 
@@ -112,7 +128,13 @@ func (m *swmr) TryClose() (bool, error) {
 		return true, nil
 	}
 
+	if m.beforeCloseFunc != nil {
+		m.beforeCloseFunc()
+	}
 	err := m.buf.Close()
+	if m.afterCloseFunc != nil {
+		err = m.afterCloseFunc(err)
+	}
 	if err != nil {
 		return true, err
 	}
