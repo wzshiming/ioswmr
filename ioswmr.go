@@ -9,11 +9,18 @@ import (
 
 var ErrClosedPipe = io.ErrClosedPipe
 
+// Writer is an interface that represents a writer that can be closed with an error.
+type Writer interface {
+	io.WriteCloser
+	// CloseWithError closes the writer with the given error. If err is nil, it will be treated as io.EOF.
+	CloseWithError(err error) error
+}
+
 // SWMR is a single-writer-multiple-reader interface
 // that allows for a single writer and multiple readers to access the same stream.
 type SWMR interface {
 	// Writer returns a WriteCloser that can be used to write to the stream.
-	Writer() io.WriteCloser
+	Writer() Writer
 	// Length returns the current length of the stream.
 	Length() int
 	// WriteDone returns true if the writer has closed the stream, false otherwise.
@@ -33,6 +40,7 @@ type swmr struct {
 	mut             sync.RWMutex
 	buf             Buffer
 	isClosed        atomic.Bool
+	err             error
 	length          int
 	using           atomic.Int64
 	autoClose       bool
@@ -85,7 +93,7 @@ func NewSWMR(buf Buffer, opts ...Option) SWMR {
 	return m
 }
 
-func (m *swmr) Writer() io.WriteCloser {
+func (m *swmr) Writer() Writer {
 	return &writer{
 		swmr: m,
 	}
@@ -207,13 +215,24 @@ func (w *writer) Write(p []byte) (n int, err error) {
 }
 
 func (w *writer) Close() error {
+	return w.CloseWithError(nil)
+}
+
+func (w *writer) CloseWithError(err error) error {
 	if w.swmr.isClosed.Swap(true) {
 		return ErrClosedPipe
 	}
+
+	if err == nil {
+		err = io.EOF
+	}
+
+	w.swmr.err = err
+
 	close(w.swmr.ch)
 
 	if w.swmr.autoClose && w.swmr.ReaderUsing() == 0 {
-		w.swmr.TryClose()
+		_, _ = w.swmr.TryClose()
 	}
 	return nil
 }
@@ -228,7 +247,7 @@ func (m *reader) Read(p []byte) (n int, err error) {
 		_, ok := <-m.swmr.ch
 		if !ok {
 			if m.off >= m.swmr.Length() {
-				return 0, io.EOF
+				return 0, m.swmr.err
 			}
 			break
 		}
@@ -264,7 +283,10 @@ func (m *readSeeker) Read(p []byte) (n int, err error) {
 		_, ok := <-m.swmr.ch
 		if !ok {
 			if m.off >= m.swmr.Length() {
-				return 0, io.ErrUnexpectedEOF
+				if m.swmr.err == io.EOF {
+					return 0, io.ErrUnexpectedEOF
+				}
+				return 0, m.swmr.err
 			}
 			break
 		}
