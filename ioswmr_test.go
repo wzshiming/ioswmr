@@ -3,7 +3,6 @@ package ioswmr
 import (
 	"bytes"
 	"io"
-	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -30,17 +29,51 @@ func TestMemory(t *testing.T) {
 	}
 }
 
-func TestFile(t *testing.T) {
-	f, err := os.CreateTemp("", "ioswmr_test")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	defer os.Remove(f.Name())
+func TestTemporaryFile(t *testing.T) {
+	f := NewTemporaryFileBuffer(nil)
+	defer func() {
+		_ = f.Close()
+	}()
 
 	reset := func() {
-		f.Seek(0, 0)
-		f.Truncate(0)
+		f.Close()
+		f = NewTemporaryFileBuffer(nil)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		testBaseCase(t, f)
+		reset()
+		testClose(t, f)
+		reset()
+		testConcurrentReads(t, f)
+		reset()
+		testConcurrentReadSeekers(t, f)
+		reset()
+		testReadSeeker(t, f)
+		reset()
+		testReadSeekerIncompleteWrite(t, f)
+		reset()
+		testReadSeekerBeyondWritten(t, f)
+	}()
+
+	select {
+	case <-time.After(time.Second * 10):
+		t.Fatal("timeout")
+	case <-done:
+	}
+}
+
+func TestMemoryOrTemporaryFile(t *testing.T) {
+	f := NewMemoryOrTemporaryFileBuffer(nil, nil)
+	defer func() {
+		_ = f.Close()
+	}()
+
+	reset := func() {
+		f.Close()
+		f = NewMemoryOrTemporaryFileBuffer(nil, nil)
 	}
 
 	done := make(chan struct{})
@@ -70,6 +103,16 @@ func TestFile(t *testing.T) {
 
 func testBaseCase(t *testing.T, buf Buffer) {
 	m := NewSWMR(buf)
+	defer func() {
+		ok, err := m.TryClose()
+		if err != nil {
+			t.Errorf("TryClose failed: %s", err)
+		}
+
+		if !ok {
+			t.Errorf("TryClose failed: ReaderUsing() == %d, WriteDone() == %v", m.ReaderUsing(), m.WriteDone())
+		}
+	}()
 	var times atomic.Uint32
 
 	bufs := [][]byte{}
@@ -105,13 +148,14 @@ func testBaseCase(t *testing.T, buf Buffer) {
 		[]byte("!"),
 	}
 
+	w := m.Writer()
 	for _, d := range data {
 		for i := 0; i != 3; i++ {
 			go testFunc("before " + string(d))
 		}
 
 		time.Sleep(10 * time.Millisecond)
-		if _, err := m.Write(d); err != nil {
+		if _, err := w.Write(d); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -121,7 +165,7 @@ func testBaseCase(t *testing.T, buf Buffer) {
 		go testFunc("before close")
 	}
 
-	m.Close()
+	w.Close()
 	for i := 0; i != 3; i++ {
 		go testFunc("closed")
 	}
@@ -131,28 +175,52 @@ func testBaseCase(t *testing.T, buf Buffer) {
 	for times.Load() != 18 {
 		time.Sleep(10 * time.Millisecond)
 	}
-	if m.Using() != 0 {
-		t.Errorf("Expected Using() to be 0 after all readers are done, got %d", m.Using())
+	if m.ReaderUsing() != 0 {
+		t.Errorf("Expected ReaderUsing() to be 0 after all readers are done, got %d", m.ReaderUsing())
 	}
 }
 
 func testClose(t *testing.T, buf Buffer) {
 	m := NewSWMR(buf)
-	defer m.Close()
+	defer func() {
+		ok, err := m.TryClose()
+		if err != nil {
+			t.Errorf("TryClose failed: %s", err)
+		}
 
-	if err := m.Close(); err != nil {
+		if !ok {
+			t.Errorf("TryClose failed: ReaderUsing() == %d, WriteDone() == %v", m.ReaderUsing(), m.WriteDone())
+		}
+	}()
+
+	w := m.Writer()
+	defer w.Close()
+
+	if err := w.Close(); err != nil {
 		t.Fatalf("Close failed: %s", err)
 	}
 
-	_, err := m.Write([]byte("Data after close"))
-	if err != io.ErrClosedPipe {
+	_, err := w.Write([]byte("Data after close"))
+	if err != ErrClosedPipe {
 		t.Errorf("Expected ErrClosedPipe, got %v", err)
 	}
 }
 
 func testConcurrentReads(t *testing.T, buf Buffer) {
 	m := NewSWMR(buf)
-	defer m.Close()
+	defer func() {
+		ok, err := m.TryClose()
+		if err != nil {
+			t.Errorf("TryClose failed: %s", err)
+		}
+
+		if !ok {
+			t.Errorf("TryClose failed: ReaderUsing() == %d, WriteDone() == %v", m.ReaderUsing(), m.WriteDone())
+		}
+	}()
+
+	w := m.Writer()
+	defer w.Close()
 
 	data := bytes.Repeat([]byte("Concurrent Read Data! "), 1024*100)
 
@@ -178,21 +246,33 @@ func testConcurrentReads(t *testing.T, buf Buffer) {
 		}()
 	}
 
-	_, err := m.Write(data)
+	_, err := w.Write(data)
 	if err != nil {
 		t.Fatalf("Write failed: %s", err)
 	}
 
 	wg.Wait()
 
-	if m.Using() != 0 {
-		t.Errorf("Expected Using() to be 0 after all readers are done, got %d", m.Using())
+	if m.ReaderUsing() != 0 {
+		t.Errorf("Expected ReaderUsing() to be 0 after all readers are done, got %d", m.ReaderUsing())
 	}
 }
 
 func testConcurrentReadSeekers(t *testing.T, buf Buffer) {
 	m := NewSWMR(buf)
-	defer m.Close()
+	defer func() {
+		ok, err := m.TryClose()
+		if err != nil {
+			t.Errorf("TryClose failed: %s", err)
+		}
+
+		if !ok {
+			t.Errorf("TryClose failed: ReaderUsing() == %d, WriteDone() == %v", m.ReaderUsing(), m.WriteDone())
+		}
+	}()
+
+	w := m.Writer()
+	defer w.Close()
 
 	data := bytes.Repeat([]byte("ReadSeeker Concurrent! "), 1024*10)
 
@@ -203,6 +283,7 @@ func testConcurrentReadSeekers(t *testing.T, buf Buffer) {
 		go func() {
 			defer wg.Done()
 			rs := m.NewReadSeeker(0, len(data))
+			defer rs.Close()
 			readBuf := make([]byte, len(data))
 			n, err := io.ReadFull(rs, readBuf)
 			if err != nil {
@@ -239,7 +320,7 @@ func testConcurrentReadSeekers(t *testing.T, buf Buffer) {
 		}()
 	}
 
-	_, err := m.Write(data)
+	_, err := w.Write(data)
 	if err != nil {
 		t.Fatalf("Write failed: %s", err)
 	}
@@ -249,14 +330,27 @@ func testConcurrentReadSeekers(t *testing.T, buf Buffer) {
 
 func testReadSeeker(t *testing.T, buf Buffer) {
 	m := NewSWMR(buf)
+	defer func() {
+		ok, err := m.TryClose()
+		if err != nil {
+			t.Errorf("TryClose failed: %s", err)
+		}
+
+		if !ok {
+			t.Errorf("TryClose failed: ReaderUsing() == %d, WriteDone() == %v", m.ReaderUsing(), m.WriteDone())
+		}
+	}()
+
+	w := m.Writer()
 
 	data := []byte("Hello World!")
-	if _, err := m.Write(data); err != nil {
+	if _, err := w.Write(data); err != nil {
 		t.Fatal(err)
 	}
-	m.Close()
+	w.Close()
 
 	rs := m.NewReadSeeker(0, len(data))
+	defer rs.Close()
 
 	// Read first 5 bytes
 	buf1 := make([]byte, 5)
@@ -350,12 +444,25 @@ func testReadSeeker(t *testing.T, buf Buffer) {
 
 func testReadSeekerIncompleteWrite(t *testing.T, buf Buffer) {
 	m := NewSWMR(buf)
+	defer func() {
+		ok, err := m.TryClose()
+		if err != nil {
+			t.Errorf("TryClose failed: %s", err)
+		}
+
+		if !ok {
+			t.Errorf("TryClose failed: ReaderUsing() == %d, WriteDone() == %v", m.ReaderUsing(), m.WriteDone())
+		}
+	}()
+
+	w := m.Writer()
 
 	// Create a ReadSeeker for 12 bytes before all data is written
 	rs := m.NewReadSeeker(0, 12)
+	defer rs.Close()
 
 	// Write partial data
-	if _, err := m.Write([]byte("Hello")); err != nil {
+	if _, err := w.Write([]byte("Hello")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -372,8 +479,8 @@ func testReadSeekerIncompleteWrite(t *testing.T, buf Buffer) {
 	// Write remaining data and close
 	go func() {
 		time.Sleep(10 * time.Millisecond)
-		m.Write([]byte(" World!"))
-		m.Close()
+		w.Write([]byte(" World!"))
+		w.Close()
 	}()
 
 	// Read remaining data
@@ -400,15 +507,29 @@ func testReadSeekerIncompleteWrite(t *testing.T, buf Buffer) {
 
 func testReadSeekerBeyondWritten(t *testing.T, buf Buffer) {
 	m := NewSWMR(buf)
+	defer func() {
+		ok, err := m.TryClose()
+		if err != nil {
+			t.Errorf("TryClose failed: %s", err)
+		}
+
+		if !ok {
+			t.Errorf("TryClose failed: ReaderUsing() == %d, WriteDone() == %v", m.ReaderUsing(), m.WriteDone())
+		}
+	}()
+
+	w := m.Writer()
 
 	data := []byte("Hello World!")
-	if _, err := m.Write(data); err != nil {
+	if _, err := w.Write(data); err != nil {
 		t.Fatal(err)
 	}
-	m.Close()
+	w.Close()
 
 	// Create a ReadSeeker with length larger than written data
 	rs := m.NewReadSeeker(0, len(data)+100)
+	defer rs.Close()
+
 	readBuf := make([]byte, len(data)+100)
 	n, err := rs.Read(readBuf)
 	if err != nil {

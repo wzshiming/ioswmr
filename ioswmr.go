@@ -7,39 +7,54 @@ import (
 	"sync/atomic"
 )
 
+var ErrClosedPipe = io.ErrClosedPipe
+
 // SWMR is a single-writer-multiple-reader interface
 // that allows for a single writer and multiple readers to access the same stream.
 type SWMR interface {
-	Buffer
-	io.Closer
+	// Writer returns a WriteCloser that can be used to write to the stream.
+	Writer() io.WriteCloser
+	// Length returns the current length of the stream.
 	Length() int
-	Using() int
-	IsClosed() bool
+	// WriteDone returns true if the writer has closed the stream, false otherwise.
+	WriteDone() bool
+	// NewReader returns a ReadCloser that can be used to read from the stream starting at the given offset.
 	NewReader(offset int) io.ReadCloser
+	// NewReadSeeker returns a ReadSeekCloser that can be used to read from the stream starting at the given offset and with the given length.
 	NewReadSeeker(offset int, length int) io.ReadSeekCloser
-}
-
-// Buffer is an interface that represents a buffer.
-type Buffer interface {
-	io.Writer
-	io.ReaderAt
+	// ReaderUsing returns the number of readers currently using the stream.
+	ReaderUsing() int
+	// TryClose attempts to close the stream if there are no active readers and the writer has closed the stream.
+	// It returns true if the stream was successfully closed, false if it was not closed due to active readers or an open writer, and an error if an error occurred during closing.
+	TryClose() (bool, error)
 }
 
 type swmr struct {
-	mut      sync.RWMutex
-	buf      Buffer
-	isClosed atomic.Bool
-	length   int
-	using    atomic.Int64
+	mut       sync.RWMutex
+	buf       Buffer
+	isClosed  atomic.Bool
+	length    int
+	using     atomic.Int64
+	autoClose bool
 
 	ch chan struct{}
 }
 
+type Option func(*swmr)
+
+// WithAutoClose configures the SWMR to automatically close the buffer when the writer is closed and there are no active readers.
+// This option is useful for ensuring that resources are released promptly without requiring explicit calls to TryClose.
+func WithAutoClose() Option {
+	return func(m *swmr) {
+		m.autoClose = true
+	}
+}
+
 // NewSWMR returns a new SWMR with a buffer.
 // If the buffer is nil, it will use the memory buffer.
-func NewSWMR(buf Buffer) SWMR {
+func NewSWMR(buf Buffer, opts ...Option) SWMR {
 	if buf == nil {
-		buf = &memory{}
+		buf = NewMemoryBuffer(nil)
 	}
 
 	m := &swmr{
@@ -47,33 +62,25 @@ func NewSWMR(buf Buffer) SWMR {
 		ch:  make(chan struct{}),
 	}
 
+	for _, opt := range opts {
+		opt(m)
+	}
+
 	return m
 }
 
-func (m *swmr) Write(p []byte) (n int, err error) {
-	if m.isClosed.Load() {
-		return 0, io.ErrClosedPipe
+func (m *swmr) Writer() io.WriteCloser {
+	return &writer{
+		swmr: m,
 	}
-	if len(p) == 0 {
-		return 0, nil
-	}
-
-	m.mut.Lock()
-	n, err = m.buf.Write(p)
-	if n > 0 {
-		m.length += n
-	}
-	m.mut.Unlock()
-
-	if n > 0 {
-		m.targetNotify()
-	}
-	return n, err
 }
 
 func (m *swmr) ReadAt(p []byte, off int64) (n int, err error) {
 	m.mut.RLock()
 	defer m.mut.RUnlock()
+	if m.buf == nil {
+		return 0, ErrClosedPipe
+	}
 	return m.buf.ReadAt(p, off)
 }
 
@@ -83,20 +90,34 @@ func (m *swmr) Length() int {
 	return m.length
 }
 
-func (m *swmr) Using() int {
+func (m *swmr) ReaderUsing() int {
 	return int(m.using.Load())
 }
 
-func (m *swmr) IsClosed() bool {
+func (m *swmr) WriteDone() bool {
 	return m.isClosed.Load()
 }
 
-func (m *swmr) Close() error {
-	if m.isClosed.Swap(true) {
-		return io.ErrClosedPipe
+func (m *swmr) TryClose() (bool, error) {
+	if m.ReaderUsing() != 0 {
+		return false, nil
 	}
-	close(m.ch)
-	return nil
+	if !m.WriteDone() {
+		return false, nil
+	}
+
+	m.mut.Lock()
+	defer m.mut.Unlock()
+	if m.buf == nil {
+		return true, nil
+	}
+
+	err := m.buf.Close()
+	if err != nil {
+		return true, err
+	}
+	m.buf = nil
+	return true, nil
 }
 
 func (m *swmr) targetNotify() {
@@ -114,7 +135,11 @@ func (m *swmr) acquire() {
 }
 
 func (m *swmr) release() {
-	_ = m.using.Add(-1)
+	if m.using.Add(-1) == 0 {
+		if m.autoClose && m.WriteDone() {
+			m.TryClose()
+		}
+	}
 }
 
 func (m *swmr) NewReader(offset int) io.ReadCloser {
@@ -132,6 +157,43 @@ func (m *swmr) NewReadSeeker(offset int, length int) io.ReadSeekCloser {
 		off:    offset,
 		length: length,
 	}
+}
+
+type writer struct {
+	swmr *swmr
+}
+
+func (w *writer) Write(p []byte) (n int, err error) {
+	if w.swmr.isClosed.Load() {
+		return 0, ErrClosedPipe
+	}
+	if len(p) == 0 {
+		return 0, nil
+	}
+
+	w.swmr.mut.Lock()
+	n, err = w.swmr.buf.Write(p)
+	if n > 0 {
+		w.swmr.length += n
+	}
+	w.swmr.mut.Unlock()
+
+	if n > 0 {
+		w.swmr.targetNotify()
+	}
+	return n, err
+}
+
+func (w *writer) Close() error {
+	if w.swmr.isClosed.Swap(true) {
+		return ErrClosedPipe
+	}
+	close(w.swmr.ch)
+
+	if w.swmr.autoClose && w.swmr.ReaderUsing() == 0 {
+		w.swmr.TryClose()
+	}
+	return nil
 }
 
 type reader struct {
@@ -228,22 +290,4 @@ func (m *readSeeker) Seek(offset int64, whence int) (int64, error) {
 func (m *readSeeker) Close() error {
 	m.swmr.release()
 	return nil
-}
-
-type memory struct {
-	buf []byte
-}
-
-func (m *memory) Write(p []byte) (n int, err error) {
-	m.buf = append(m.buf, p...)
-	return len(p), nil
-}
-
-func (m *memory) ReadAt(p []byte, off int64) (n int, err error) {
-	if off >= int64(len(m.buf)) {
-		return 0, io.EOF
-	}
-
-	n = copy(p, m.buf[off:])
-	return n, nil
 }
