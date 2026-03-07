@@ -77,6 +77,7 @@ func WithAfterCloseFunc(f func(err error) error) Option {
 // WithRecover sets the initial length of data already present in the buffer.
 // This is useful for recovering progress from a file cache that already contains data.
 // The buffer must already contain the specified number of bytes.
+// If length is not positive, it has no effect.
 func WithRecover(length int) Option {
 	return func(m *swmr) {
 		if length > 0 {

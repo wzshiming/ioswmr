@@ -212,8 +212,9 @@ type fileBuffer struct {
 
 // NewFileBuffer creates a buffer from an existing file.
 // Unlike NewTemporaryFileBuffer, the file is not created or deleted by the buffer.
-// The caller is responsible for managing the file's lifecycle and positioning the
-// file offset for writing (e.g., seeking to the end for appending).
+// Closing the buffer will close the underlying file handle but will not delete the file.
+// The caller is responsible for positioning the file offset for writing
+// (e.g., seeking to the end for appending) and for deleting the file if needed.
 // This is useful for recovering progress from a file cache.
 func NewFileBuffer(file *os.File) Buffer {
 	if file == nil {
