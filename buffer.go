@@ -205,3 +205,31 @@ func (m *memoryOrTemporaryFile) Close() error {
 	}
 	return nil
 }
+
+type fileBuffer struct {
+	file *os.File
+}
+
+// NewFileBuffer creates a buffer from an existing file.
+// Unlike NewTemporaryFileBuffer, the file is not created or deleted by the buffer.
+// The caller is responsible for managing the file's lifecycle and positioning the
+// file offset for writing (e.g., seeking to the end for appending).
+// This is useful for recovering progress from a file cache.
+func NewFileBuffer(file *os.File) Buffer {
+	if file == nil {
+		return NewTemporaryFileBuffer(nil)
+	}
+	return &fileBuffer{file: file}
+}
+
+func (f *fileBuffer) Write(p []byte) (int, error) {
+	return f.file.Write(p)
+}
+
+func (f *fileBuffer) ReadAt(p []byte, off int64) (int, error) {
+	return f.file.ReadAt(p, off)
+}
+
+func (f *fileBuffer) Close() error {
+	return f.file.Close()
+}

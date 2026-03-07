@@ -74,6 +74,17 @@ func WithAfterCloseFunc(f func(err error) error) Option {
 	}
 }
 
+// WithRecover sets the initial length of data already present in the buffer.
+// This is useful for recovering progress from a file cache that already contains data.
+// The buffer must already contain the specified number of bytes.
+func WithRecover(length int) Option {
+	return func(m *swmr) {
+		if length > 0 {
+			m.length = length
+		}
+	}
+}
+
 // NewSWMR returns a new SWMR with a buffer.
 // If the buffer is nil, it will use the memory buffer.
 func NewSWMR(buf Buffer, opts ...Option) SWMR {
