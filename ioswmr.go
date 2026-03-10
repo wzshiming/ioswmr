@@ -74,6 +74,13 @@ func WithAfterCloseFunc(f func(err error) error) Option {
 	}
 }
 
+// WithLength sets the initial length of the stream. This can be useful when the buffer is pre-populated with data or when the length is known in advance.
+func WithLength(length int) Option {
+	return func(m *swmr) {
+		m.length = length
+	}
+}
+
 // NewSWMR returns a new SWMR with a buffer.
 // If the buffer is nil, it will use the memory buffer.
 func NewSWMR(buf Buffer, opts ...Option) SWMR {
