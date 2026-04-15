@@ -245,8 +245,9 @@ func (w *writer) CloseWithError(err error) error {
 }
 
 type reader struct {
-	swmr *swmr
-	off  int
+	swmr     *swmr
+	off      int
+	released atomic.Bool
 }
 
 func (m *reader) Read(p []byte) (n int, err error) {
@@ -254,6 +255,7 @@ func (m *reader) Read(p []byte) (n int, err error) {
 		_, ok := <-m.swmr.ch
 		if !ok {
 			if m.off >= m.swmr.Length() {
+				m.release()
 				return 0, m.swmr.err
 			}
 			break
@@ -270,15 +272,23 @@ func (m *reader) Read(p []byte) (n int, err error) {
 	return n, err
 }
 
-func (m *reader) Close() error {
+func (m *reader) release() {
+	if m.released.Swap(true) {
+		return
+	}
 	m.swmr.release()
+}
+
+func (m *reader) Close() error {
+	m.release()
 	return nil
 }
 
 type readSeeker struct {
-	swmr   *swmr
-	off    int
-	length int
+	swmr     *swmr
+	off      int
+	length   int
+	released atomic.Bool
 }
 
 func (m *readSeeker) Read(p []byte) (n int, err error) {
@@ -338,7 +348,14 @@ func (m *readSeeker) Seek(offset int64, whence int) (int64, error) {
 	return newPos, nil
 }
 
-func (m *readSeeker) Close() error {
+func (m *readSeeker) release() {
+	if m.released.Swap(true) {
+		return
+	}
 	m.swmr.release()
+}
+
+func (m *readSeeker) Close() error {
+	m.release()
 	return nil
 }

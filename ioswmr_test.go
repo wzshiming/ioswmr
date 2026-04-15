@@ -101,6 +101,76 @@ func TestMemoryOrTemporaryFile(t *testing.T) {
 	}
 }
 
+func TestAutoCloseAfterReaderEOF(t *testing.T) {
+	var closed atomic.Uint32
+
+	m := NewSWMR(nil,
+		WithAutoClose(),
+		WithBeforeCloseFunc(func() {
+			closed.Add(1)
+		}),
+	)
+
+	r := m.NewReader(0)
+	w := m.Writer()
+
+	if _, err := w.Write([]byte("Hello World!")); err != nil {
+		t.Fatalf("Write failed: %s", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close failed: %s", err)
+	}
+
+	buf, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("ReadAll failed: %s", err)
+	}
+	if string(buf) != "Hello World!" {
+		t.Fatalf("Expected \"Hello World!\", got %q", buf)
+	}
+
+	if m.ReaderUsing() != 0 {
+		t.Fatalf("Expected ReaderUsing() to be 0, got %d", m.ReaderUsing())
+	}
+	if closed.Load() != 1 {
+		t.Fatalf("Expected auto close hook to run once, got %d", closed.Load())
+	}
+	if err := r.Close(); err != nil {
+		t.Fatalf("Reader close failed: %s", err)
+	}
+}
+
+func TestAutoCloseWithDuplicateReaderClose(t *testing.T) {
+	var closed atomic.Uint32
+
+	m := NewSWMR(nil,
+		WithAutoClose(),
+		WithBeforeCloseFunc(func() {
+			closed.Add(1)
+		}),
+	)
+
+	r := m.NewReader(0)
+	if err := r.Close(); err != nil {
+		t.Fatalf("First reader close failed: %s", err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatalf("Second reader close failed: %s", err)
+	}
+
+	w := m.Writer()
+	if err := w.Close(); err != nil {
+		t.Fatalf("Writer close failed: %s", err)
+	}
+
+	if m.ReaderUsing() != 0 {
+		t.Fatalf("Expected ReaderUsing() to be 0, got %d", m.ReaderUsing())
+	}
+	if closed.Load() != 1 {
+		t.Fatalf("Expected auto close hook to run once, got %d", closed.Load())
+	}
+}
+
 func testBaseCase(t *testing.T, buf Buffer) {
 	m := NewSWMR(buf)
 	defer func() {
