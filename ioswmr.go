@@ -11,7 +11,9 @@ var ErrClosedPipe = io.ErrClosedPipe
 
 // Writer is an interface that represents a writer that can be closed with an error.
 type Writer interface {
-	io.WriteCloser
+	io.Writer
+	io.Seeker
+	io.Closer
 	// CloseWithError closes the writer with the given error. If err is nil, it will be treated as io.EOF.
 	CloseWithError(err error) error
 }
@@ -71,13 +73,6 @@ func WithBeforeCloseFunc(f func()) Option {
 func WithAfterCloseFunc(f func(err error) error) Option {
 	return func(m *swmr) {
 		m.afterCloseFunc = f
-	}
-}
-
-// WithLength sets the initial length of the stream. This can be useful when the buffer is pre-populated with data or when the length is known in advance.
-func WithLength(length int) Option {
-	return func(m *swmr) {
-		m.length = length
 	}
 }
 
@@ -198,6 +193,27 @@ func (m *swmr) NewReadSeeker(offset int, length int) io.ReadSeekCloser {
 
 type writer struct {
 	swmr *swmr
+}
+
+func (w *writer) Seek(offset int64, whence int) (int64, error) {
+	if w.swmr.isClosed.Load() {
+		return 0, ErrClosedPipe
+	}
+
+	w.swmr.mut.Lock()
+	n, err := w.swmr.buf.Seek(offset, whence)
+	if n > 0 {
+		w.swmr.length = int(n)
+	}
+	w.swmr.mut.Unlock()
+	if err != nil {
+		return 0, err
+	}
+
+	if n > 0 {
+		w.swmr.targetNotify()
+	}
+	return n, nil
 }
 
 func (w *writer) Write(p []byte) (n int, err error) {

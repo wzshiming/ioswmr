@@ -11,6 +11,7 @@ type Buffer interface {
 	io.Writer
 	io.ReaderAt
 	io.Closer
+	io.Seeker
 }
 
 type memory struct {
@@ -57,6 +58,26 @@ func (m *memory) ReadAt(p []byte, off int64) (n int, err error) {
 	return n, nil
 }
 
+func (m *memory) Seek(offset int64, whence int) (int64, error) {
+	var newOffset int64
+	switch whence {
+	case io.SeekStart:
+		newOffset = offset
+	case io.SeekCurrent:
+		newOffset = int64(len(m.buf)) + offset
+	case io.SeekEnd:
+		newOffset = int64(len(m.buf)) + offset
+	default:
+		return 0, os.ErrInvalid
+	}
+
+	if newOffset < 0 {
+		return 0, os.ErrInvalid
+	}
+
+	return newOffset, nil
+}
+
 func (m *memory) Close() error {
 	if m.isPooled {
 		pool.Put(&m.buf)
@@ -101,6 +122,13 @@ func (m *temporaryFile) ReadAt(p []byte, off int64) (n int, err error) {
 		return 0, io.EOF
 	}
 	return m.file.ReadAt(p, off)
+}
+
+func (m *temporaryFile) Seek(offset int64, whence int) (int64, error) {
+	if m.file == nil {
+		return 0, os.ErrInvalid
+	}
+	return m.file.Seek(offset, whence)
 }
 
 func (m *temporaryFile) Close() error {
@@ -182,6 +210,30 @@ func (m *memoryOrTemporaryFile) ReadAt(p []byte, off int64) (n int, err error) {
 
 	n = copy(p, m.buf[off:])
 	return n, nil
+}
+
+func (m *memoryOrTemporaryFile) Seek(offset int64, whence int) (int64, error) {
+	if m.tempFile != nil {
+		return m.tempFile.Seek(offset, whence)
+	}
+
+	var newOffset int64
+	switch whence {
+	case io.SeekStart:
+		newOffset = offset
+	case io.SeekCurrent:
+		newOffset = int64(len(m.buf)) + offset
+	case io.SeekEnd:
+		newOffset = int64(len(m.buf)) + offset
+	default:
+		return 0, os.ErrInvalid
+	}
+
+	if newOffset < 0 {
+		return 0, os.ErrInvalid
+	}
+
+	return newOffset, nil
 }
 
 func (m *memoryOrTemporaryFile) Close() error {

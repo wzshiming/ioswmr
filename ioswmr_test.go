@@ -20,6 +20,7 @@ func TestMemory(t *testing.T) {
 		testReadSeeker(t, nil)
 		testReadSeekerIncompleteWrite(t, nil)
 		testReadSeekerBeyondWritten(t, nil)
+		testWriterSeekResume(t, NewMemoryBuffer(nil))
 	}()
 
 	select {
@@ -56,6 +57,8 @@ func TestTemporaryFile(t *testing.T) {
 		testReadSeekerIncompleteWrite(t, f)
 		reset()
 		testReadSeekerBeyondWritten(t, f)
+		reset()
+		testWriterSeekResume(t, f)
 	}()
 
 	select {
@@ -92,6 +95,8 @@ func TestMemoryOrTemporaryFile(t *testing.T) {
 		testReadSeekerIncompleteWrite(t, f)
 		reset()
 		testReadSeekerBeyondWritten(t, f)
+		reset()
+		testWriterSeekResume(t, f)
 	}()
 
 	select {
@@ -617,5 +622,65 @@ func testReadSeekerBeyondWritten(t *testing.T, buf Buffer) {
 	_, err = rs.Read(readBuf)
 	if err != io.ErrUnexpectedEOF {
 		t.Fatalf("Expected ErrUnexpectedEOF, got %s", err)
+	}
+}
+
+// testWriterSeekResume tests resuming writing from pre-existing data already in the buffer.
+// buf must be a freshly created, empty buffer; the function pre-populates it to simulate
+// a scenario where data was written in a previous session.
+func testWriterSeekResume(t *testing.T, buf Buffer) {
+	preExisting := []byte("Hello ")
+	if _, err := buf.Write(preExisting); err != nil {
+		t.Fatalf("pre-populate Write failed: %s", err)
+	}
+
+	m := NewSWMR(buf)
+	defer func() {
+		ok, err := m.TryClose()
+		if err != nil {
+			t.Errorf("TryClose failed: %s", err)
+		}
+		if !ok {
+			t.Errorf("TryClose failed: ReaderUsing() == %d, WriteDone() == %v", m.ReaderUsing(), m.WriteDone())
+		}
+	}()
+
+	w := m.Writer()
+
+	// Before seeking, the pre-existing data is not yet visible to readers.
+	if m.Length() != 0 {
+		t.Fatalf("Expected initial Length 0, got %d", m.Length())
+	}
+
+	// Seek to end: acknowledge pre-existing data and set the write resume point.
+	pos, err := w.Seek(0, io.SeekEnd)
+	if err != nil {
+		t.Fatalf("Seek to end failed: %s", err)
+	}
+	if pos != int64(len(preExisting)) {
+		t.Fatalf("Expected seek position %d, got %d", len(preExisting), pos)
+	}
+	if m.Length() != len(preExisting) {
+		t.Fatalf("Expected Length %d after seek, got %d", len(preExisting), m.Length())
+	}
+
+	// Continue writing new data from where the buffer left off.
+	if _, err := w.Write([]byte("World!")); err != nil {
+		t.Fatalf("Write failed: %s", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close failed: %s", err)
+	}
+
+	// Reader from offset 0 should see both pre-existing and newly written data.
+	r := m.NewReader(0)
+	defer r.Close()
+	got, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("ReadAll failed: %s", err)
+	}
+	want := "Hello World!"
+	if string(got) != want {
+		t.Fatalf("Expected %q, got %q", want, string(got))
 	}
 }
