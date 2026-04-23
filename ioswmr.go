@@ -49,7 +49,8 @@ type swmr struct {
 	beforeCloseFunc func()
 	afterCloseFunc  func(err error) error
 
-	ch chan struct{}
+	chMut     sync.Mutex
+	readerChs map[chan struct{}]struct{}
 }
 
 type Option func(*swmr)
@@ -84,8 +85,8 @@ func NewSWMR(buf Buffer, opts ...Option) SWMR {
 	}
 
 	m := &swmr{
-		buf: buf,
-		ch:  make(chan struct{}),
+		buf:       buf,
+		readerChs: make(map[chan struct{}]struct{}),
 	}
 
 	for _, opt := range opts {
@@ -153,13 +154,30 @@ func (m *swmr) TryClose() (bool, error) {
 }
 
 func (m *swmr) targetNotify() {
-	for i := 0; i < m.Length(); i++ {
+	m.chMut.Lock()
+	defer m.chMut.Unlock()
+	for ch := range m.readerChs {
 		select {
-		case m.ch <- struct{}{}:
+		case ch <- struct{}{}:
 		default:
-			return
 		}
 	}
+}
+
+func (m *swmr) registerReaderCh(ch chan struct{}) {
+	m.chMut.Lock()
+	defer m.chMut.Unlock()
+	if m.isClosed.Load() {
+		close(ch)
+		return
+	}
+	m.readerChs[ch] = struct{}{}
+}
+
+func (m *swmr) unregisterReaderCh(ch chan struct{}) {
+	m.chMut.Lock()
+	defer m.chMut.Unlock()
+	delete(m.readerChs, ch)
 }
 
 func (m *swmr) acquire() {
@@ -176,18 +194,24 @@ func (m *swmr) release() {
 
 func (m *swmr) NewReader(offset int) io.ReadCloser {
 	m.acquire()
+	ch := make(chan struct{}, 1)
+	m.registerReaderCh(ch)
 	return &reader{
 		swmr: m,
 		off:  offset,
+		ch:   ch,
 	}
 }
 
 func (m *swmr) NewReadSeeker(offset int, length int) io.ReadSeekCloser {
 	m.acquire()
+	ch := make(chan struct{}, 1)
+	m.registerReaderCh(ch)
 	return &readSeeker{
 		swmr:   m,
 		off:    offset,
 		length: length,
+		ch:     ch,
 	}
 }
 
@@ -252,7 +276,12 @@ func (w *writer) CloseWithError(err error) error {
 
 	w.swmr.err = err
 
-	close(w.swmr.ch)
+	w.swmr.chMut.Lock()
+	for ch := range w.swmr.readerChs {
+		close(ch)
+	}
+	w.swmr.readerChs = make(map[chan struct{}]struct{})
+	w.swmr.chMut.Unlock()
 
 	if w.swmr.autoClose && w.swmr.ReaderUsing() == 0 {
 		_, _ = w.swmr.TryClose()
@@ -263,12 +292,13 @@ func (w *writer) CloseWithError(err error) error {
 type reader struct {
 	swmr     *swmr
 	off      int
+	ch       chan struct{}
 	released atomic.Bool
 }
 
 func (m *reader) Read(p []byte) (n int, err error) {
 	for m.off >= m.swmr.Length() {
-		_, ok := <-m.swmr.ch
+		_, ok := <-m.ch
 		if !ok {
 			if m.off >= m.swmr.Length() {
 				m.release()
@@ -292,6 +322,7 @@ func (m *reader) release() {
 	if m.released.Swap(true) {
 		return
 	}
+	m.swmr.unregisterReaderCh(m.ch)
 	m.swmr.release()
 }
 
@@ -304,6 +335,7 @@ type readSeeker struct {
 	swmr     *swmr
 	off      int
 	length   int
+	ch       chan struct{}
 	released atomic.Bool
 }
 
@@ -313,7 +345,7 @@ func (m *readSeeker) Read(p []byte) (n int, err error) {
 	}
 
 	for m.off >= m.swmr.Length() {
-		_, ok := <-m.swmr.ch
+		_, ok := <-m.ch
 		if !ok {
 			if m.off >= m.swmr.Length() {
 				if m.swmr.err == io.EOF {
@@ -368,6 +400,7 @@ func (m *readSeeker) release() {
 	if m.released.Swap(true) {
 		return
 	}
+	m.swmr.unregisterReaderCh(m.ch)
 	m.swmr.release()
 }
 
