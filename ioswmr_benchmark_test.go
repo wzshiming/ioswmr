@@ -1,17 +1,22 @@
 package ioswmr
 
 import (
-	"io"
 	"testing"
 )
 
 func benchmarkSWMR(b *testing.B, buf Buffer) {
 	swmr := NewSWMR(buf, WithAutoClose())
 
-	reader1 := swmr.NewReader(0)
+	reader1, err := swmr.NewReader(0)
+	if err != nil {
+		b.Fatal(err)
+	}
 	defer reader1.Close()
 
-	reader2 := swmr.NewReader(0)
+	reader2, err := swmr.NewReader(0)
+	if err != nil {
+		b.Fatal(err)
+	}
 	defer reader2.Close()
 
 	w := swmr.Writer()
@@ -22,11 +27,11 @@ func benchmarkSWMR(b *testing.B, buf Buffer) {
 			b.Fatalf("Write failed: %v", err)
 		}
 		result := make([]byte, len(data))
-		if _, err := reader1.Read(result); err != nil && err != io.EOF {
-			b.Fatalf("Read failed: %v", err)
+		if n, err := reader1.Read(result); err != nil || n != len(data) {
+			b.Fatalf("reader1 Read = (%d, %v), want (%d, nil)", n, err, len(data))
 		}
-		if _, err := reader2.Read(result); err != nil && err != io.EOF {
-			b.Fatalf("Read failed: %v", err)
+		if n, err := reader2.Read(result); err != nil || n != len(data) {
+			b.Fatalf("reader2 Read = (%d, %v), want (%d, nil)", n, err, len(data))
 		}
 	}
 }

@@ -9,13 +9,27 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # go.mod minimum and the latest release; setup-go prefers go-version when it is set.
+        include:
+          - go-version-file: go.mod
+          - go-version: stable
     steps:
     - uses: actions/checkout@v6
 
     - name: Set up Go
       uses: actions/setup-go@v6
       with:
-        go-version-file: go.mod
+        go-version-file: ${{ matrix.go-version-file }}
+        go-version: ${{ matrix.go-version }}
+
+    - name: Format
+      run: test -z "$(gofmt -l . | tee /dev/stderr)"
+
+    - name: Vet
+      run: go vet ./...
 
     - name: Test
-      run: go test -v ./...
+      run: go test -race -count=1 ./...
