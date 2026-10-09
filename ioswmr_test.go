@@ -10,24 +10,14 @@ import (
 )
 
 func TestMemory(t *testing.T) {
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		testBaseCase(t, nil)
-		testClose(t, nil)
-		testConcurrentReads(t, nil)
-		testConcurrentReadSeekers(t, nil)
-		testReadSeeker(t, nil)
-		testReadSeekerIncompleteWrite(t, nil)
-		testReadSeekerBeyondWritten(t, nil)
-		testWriterSeekResume(t, NewMemoryBuffer(nil))
-	}()
-
-	select {
-	case <-time.After(time.Second * 10):
-		t.Fatal("timeout")
-	case <-done:
-	}
+	testBaseCase(t, nil)
+	testClose(t, nil)
+	testConcurrentReads(t, nil)
+	testConcurrentReadSeekers(t, nil)
+	testReadSeeker(t, nil)
+	testReadSeekerIncompleteWrite(t, nil)
+	testReadSeekerBeyondWritten(t, nil)
+	testWriterSeekResume(t, NewMemoryBuffer(nil))
 }
 
 func TestTemporaryFile(t *testing.T) {
@@ -41,31 +31,21 @@ func TestTemporaryFile(t *testing.T) {
 		f = NewTemporaryFileBuffer(nil)
 	}
 
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		testBaseCase(t, f)
-		reset()
-		testClose(t, f)
-		reset()
-		testConcurrentReads(t, f)
-		reset()
-		testConcurrentReadSeekers(t, f)
-		reset()
-		testReadSeeker(t, f)
-		reset()
-		testReadSeekerIncompleteWrite(t, f)
-		reset()
-		testReadSeekerBeyondWritten(t, f)
-		reset()
-		testWriterSeekResume(t, f)
-	}()
-
-	select {
-	case <-time.After(time.Second * 10):
-		t.Fatal("timeout")
-	case <-done:
-	}
+	testBaseCase(t, f)
+	reset()
+	testClose(t, f)
+	reset()
+	testConcurrentReads(t, f)
+	reset()
+	testConcurrentReadSeekers(t, f)
+	reset()
+	testReadSeeker(t, f)
+	reset()
+	testReadSeekerIncompleteWrite(t, f)
+	reset()
+	testReadSeekerBeyondWritten(t, f)
+	reset()
+	testWriterSeekResume(t, f)
 }
 
 func TestMemoryOrTemporaryFile(t *testing.T) {
@@ -79,31 +59,21 @@ func TestMemoryOrTemporaryFile(t *testing.T) {
 		f = NewMemoryOrTemporaryFileBuffer(nil, nil)
 	}
 
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		testBaseCase(t, f)
-		reset()
-		testClose(t, f)
-		reset()
-		testConcurrentReads(t, f)
-		reset()
-		testConcurrentReadSeekers(t, f)
-		reset()
-		testReadSeeker(t, f)
-		reset()
-		testReadSeekerIncompleteWrite(t, f)
-		reset()
-		testReadSeekerBeyondWritten(t, f)
-		reset()
-		testWriterSeekResume(t, f)
-	}()
-
-	select {
-	case <-time.After(time.Second * 10):
-		t.Fatal("timeout")
-	case <-done:
-	}
+	testBaseCase(t, f)
+	reset()
+	testClose(t, f)
+	reset()
+	testConcurrentReads(t, f)
+	reset()
+	testConcurrentReadSeekers(t, f)
+	reset()
+	testReadSeeker(t, f)
+	reset()
+	testReadSeekerIncompleteWrite(t, f)
+	reset()
+	testReadSeekerBeyondWritten(t, f)
+	reset()
+	testWriterSeekResume(t, f)
 }
 
 func TestAutoCloseAfterReaderEOF(t *testing.T) {
@@ -116,7 +86,10 @@ func TestAutoCloseAfterReaderEOF(t *testing.T) {
 		}),
 	)
 
-	r := m.NewReader(0)
+	r, err := m.NewReader(0)
+	if err != nil {
+		t.Fatal(err)
+	}
 	w := m.Writer()
 
 	if _, err := w.Write([]byte("Hello World!")); err != nil {
@@ -155,7 +128,10 @@ func TestAutoCloseWithDuplicateReaderClose(t *testing.T) {
 		}),
 	)
 
-	r := m.NewReader(0)
+	r, err := m.NewReader(0)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := r.Close(); err != nil {
 		t.Fatalf("First reader close failed: %s", err)
 	}
@@ -188,22 +164,30 @@ func testBaseCase(t *testing.T, buf Buffer) {
 			t.Errorf("TryClose failed: ReaderUsing() == %d, WriteDone() == %v", m.ReaderUsing(), m.WriteDone())
 		}
 	}()
-	var times atomic.Uint32
 
 	bufs := [][]byte{}
 	var mut sync.Mutex
 
+	var wg sync.WaitGroup
 	testFunc := func(mark string) {
+		defer wg.Done()
 		buf := make([]byte, 12)
 		mut.Lock()
 		bufs = append(bufs, buf)
 		mut.Unlock()
 
-		reader := m.NewReader(0)
-		defer reader.Close()
+		reader, err := m.NewReader(0)
+		if err != nil {
+			t.Errorf("on %q: NewReader: %s", mark, err)
+			return
+		}
 		n, err := io.ReadFull(reader, buf)
 		if err != nil {
 			t.Errorf("on %q: %s", mark, err)
+		}
+		// Close before the WaitGroup is released so ReaderUsing() == 0 is deterministic.
+		if err := reader.Close(); err != nil {
+			t.Errorf("on %q: Close: %s", mark, err)
 		}
 
 		got := string(buf[:n])
@@ -213,7 +197,6 @@ func testBaseCase(t *testing.T, buf Buffer) {
 		}
 
 		t.Logf("on %q: %s", mark, got)
-		times.Add(1)
 	}
 
 	data := [][]byte{
@@ -226,6 +209,7 @@ func testBaseCase(t *testing.T, buf Buffer) {
 	w := m.Writer()
 	for _, d := range data {
 		for i := 0; i != 3; i++ {
+			wg.Add(1)
 			go testFunc("before " + string(d))
 		}
 
@@ -237,19 +221,17 @@ func testBaseCase(t *testing.T, buf Buffer) {
 
 	time.Sleep(10 * time.Millisecond)
 	for i := 0; i != 3; i++ {
+		wg.Add(1)
 		go testFunc("before close")
 	}
 
 	w.Close()
 	for i := 0; i != 3; i++ {
+		wg.Add(1)
 		go testFunc("closed")
 	}
 
-	time.Sleep(10 * time.Millisecond)
-
-	for times.Load() != 18 {
-		time.Sleep(10 * time.Millisecond)
-	}
+	wg.Wait()
 	if m.ReaderUsing() != 0 {
 		t.Errorf("Expected ReaderUsing() to be 0 after all readers are done, got %d", m.ReaderUsing())
 	}
@@ -306,7 +288,11 @@ func testConcurrentReads(t *testing.T, buf Buffer) {
 		go func() {
 			defer wg.Done()
 			readBuf := make([]byte, len(data))
-			reader := m.NewReader(0)
+			reader, err := m.NewReader(0)
+			if err != nil {
+				t.Errorf("NewReader failed: %s", err)
+				return
+			}
 			defer reader.Close()
 			n, err := io.ReadFull(reader, readBuf)
 			if err != nil && err != io.EOF {
@@ -357,7 +343,11 @@ func testConcurrentReadSeekers(t *testing.T, buf Buffer) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			rs := m.NewReadSeeker(0, len(data))
+			rs, err := m.NewReadSeeker(0, len(data))
+			if err != nil {
+				t.Errorf("NewReadSeeker failed: %s", err)
+				return
+			}
 			defer rs.Close()
 			readBuf := make([]byte, len(data))
 			n, err := io.ReadFull(rs, readBuf)
@@ -424,7 +414,10 @@ func testReadSeeker(t *testing.T, buf Buffer) {
 	}
 	w.Close()
 
-	rs := m.NewReadSeeker(0, len(data))
+	rs, err := m.NewReadSeeker(0, len(data))
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer rs.Close()
 
 	// Read first 5 bytes
@@ -533,7 +526,10 @@ func testReadSeekerIncompleteWrite(t *testing.T, buf Buffer) {
 	w := m.Writer()
 
 	// Create a ReadSeeker for 12 bytes before all data is written
-	rs := m.NewReadSeeker(0, 12)
+	rs, err := m.NewReadSeeker(0, 12)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer rs.Close()
 
 	// Write partial data
@@ -551,8 +547,11 @@ func testReadSeekerIncompleteWrite(t *testing.T, buf Buffer) {
 		t.Fatalf("Expected \"Hello\", got %q", buf1[:n])
 	}
 
-	// Write remaining data and close
+	// Write remaining data and close; joined before the deferred TryClose runs.
+	writeDone := make(chan struct{})
+	defer func() { <-writeDone }()
 	go func() {
+		defer close(writeDone)
 		time.Sleep(10 * time.Millisecond)
 		w.Write([]byte(" World!"))
 		w.Close()
@@ -602,7 +601,10 @@ func testReadSeekerBeyondWritten(t *testing.T, buf Buffer) {
 	w.Close()
 
 	// Create a ReadSeeker with length larger than written data
-	rs := m.NewReadSeeker(0, len(data)+100)
+	rs, err := m.NewReadSeeker(0, len(data)+100)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer rs.Close()
 
 	readBuf := make([]byte, len(data)+100)
@@ -673,7 +675,10 @@ func testWriterSeekResume(t *testing.T, buf Buffer) {
 	}
 
 	// Reader from offset 0 should see both pre-existing and newly written data.
-	r := m.NewReader(0)
+	r, err := m.NewReader(0)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer r.Close()
 	got, err := io.ReadAll(r)
 	if err != nil {
