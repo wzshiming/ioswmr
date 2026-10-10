@@ -11,8 +11,8 @@ import (
 // Seek reports positions relative to the buffer's current size and must accept Seek(0, io.SeekEnd),
 // returning that size (0 for a fresh buffer); the SWMR uses it to learn how much data a buffer
 // already holds when its Writer resumes. The buffers in this package are append-only: the memory
-// buffers reject any other target with ErrUnsupportedSeek, the temporary file delegates to *os.File
-// once it exists.
+// buffers reject any other target with ErrUnsupportedSeek, the temporary file delegates to *os.File,
+// opening it on the first Write or Seek.
 type Buffer interface {
 	io.Writer
 	io.ReaderAt
@@ -128,6 +128,7 @@ type temporaryFile struct {
 
 // NewTemporaryFileBuffer returns a new temporary file buffer.
 // If createTemp is nil, it will use the default createTemporaryFile function.
+// createTemp may return an existing file: Seek(0, io.SeekEnd) reports its contents, Close still removes it.
 func NewTemporaryFileBuffer(createTemp func() (*os.File, error)) Buffer {
 	if createTemp == nil {
 		createTemp = createTemporaryFile
@@ -137,13 +138,21 @@ func NewTemporaryFileBuffer(createTemp func() (*os.File, error)) Buffer {
 	}
 }
 
+func (m *temporaryFile) open() error {
+	if m.file != nil {
+		return nil
+	}
+	f, err := m.createTemp()
+	if err != nil {
+		return err
+	}
+	m.file = f
+	return nil
+}
+
 func (m *temporaryFile) Write(p []byte) (n int, err error) {
-	if m.file == nil {
-		tmpFile, err := m.createTemp()
-		if err != nil {
-			return 0, err
-		}
-		m.file = tmpFile
+	if err := m.open(); err != nil {
+		return 0, err
 	}
 	return m.file.Write(p)
 }
@@ -156,8 +165,8 @@ func (m *temporaryFile) ReadAt(p []byte, off int64) (n int, err error) {
 }
 
 func (m *temporaryFile) Seek(offset int64, whence int) (int64, error) {
-	if m.file == nil {
-		return appendOnlySeek(0, offset, whence)
+	if err := m.open(); err != nil {
+		return 0, err
 	}
 	return m.file.Seek(offset, whence)
 }

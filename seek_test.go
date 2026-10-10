@@ -3,6 +3,8 @@ package ioswmr
 import (
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -133,6 +135,43 @@ func TestSeekResume(t *testing.T) {
 	}
 }
 
+func TestSeekResumeAdoptedFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "resume")
+	if err := os.WriteFile(path, []byte("hello"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	m := NewSWMR(NewTemporaryFileBuffer(func() (*os.File, error) { return f, nil }))
+	w := m.Writer()
+	assertSeek(t, w, 0, io.SeekEnd, 5)
+	if m.Length() != 5 {
+		t.Fatalf("Length() = %d after Seek, want 5", m.Length())
+	}
+
+	r, err := m.NewReader(0)
+	if err != nil {
+		t.Fatalf("NewReader(0): %v", err)
+	}
+	writeString(t, w, " world")
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if string(got) != "hello world" {
+		t.Fatalf("stream = %q, want %q", got, "hello world")
+	}
+
+	mustTryClose(t, m)
+	assertRemoved(t, path)
+}
+
 func TestSeekFreshBuffer(t *testing.T) {
 	for _, kind := range seekBufferKinds {
 		t.Run(kind.name, func(t *testing.T) {
@@ -232,8 +271,7 @@ func TestSeekRejections(t *testing.T) {
 	}
 }
 
-// The in-memory buffers accept only their current size as a seek target; a temporary
-// file buffer behaves the same until its file exists.
+// The in-memory buffers accept only their current size as a seek target.
 func TestBufferSeekAppendOnly(t *testing.T) {
 	kinds := []struct {
 		name string
@@ -242,15 +280,12 @@ func TestBufferSeekAppendOnly(t *testing.T) {
 	}{
 		{"memory", func(t *testing.T) Buffer { return NewMemoryBuffer(nil) }, "abc"},
 		{"memoryOrTemporaryFile", func(t *testing.T) Buffer { return NewMemoryOrTemporaryFileBuffer(nil, noSpill(t)) }, "abc"},
-		{"freshTemporaryFile", func(t *testing.T) Buffer { return NewTemporaryFileBuffer(newTempRecorder(t).create) }, ""},
 	}
 	for _, kind := range kinds {
 		t.Run(kind.name, func(t *testing.T) {
 			buf := kind.new(t)
 			defer buf.Close()
-			if kind.data != "" {
-				writeString(t, buf, kind.data)
-			}
+			writeString(t, buf, kind.data)
 			size := int64(len(kind.data))
 
 			assertSeek(t, buf, 0, io.SeekEnd, size)
