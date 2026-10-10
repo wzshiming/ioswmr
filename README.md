@@ -1,6 +1,5 @@
 # ioswmr
 
-[![Go Report Card](https://goreportcard.com/badge/github.com/wzshiming/ioswmr)](https://goreportcard.com/report/github.com/wzshiming/ioswmr)
 [![GoDoc](https://godoc.org/github.com/wzshiming/ioswmr?status.svg)](https://godoc.org/github.com/wzshiming/ioswmr)
 [![GitHub license](https://img.shields.io/github/license/wzshiming/ioswmr.svg)](https://github.com/wzshiming/ioswmr/blob/master/LICENSE)
 
