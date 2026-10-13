@@ -29,6 +29,8 @@ type Writer interface {
 	io.Seeker
 	io.Closer
 	// CloseWithError closes the writer with the given error. If err is nil, it will be treated as io.EOF.
+	// A normal close (io.EOF) runs the WithBeforeLastByteFunc hook before returning.
+	// The hook's error reaches only the readers; Close or CloseWithError still returns nil.
 	CloseWithError(err error) error
 }
 
@@ -46,17 +48,21 @@ type SWMR interface {
 	// writer closes and end with the writer's error (io.EOF for Close), at which point the reader lets go
 	// of the stream; Close lets go early, wakes a blocked Read with ErrClosedPipe, and is idempotent.
 	// A negative offset is an error; once the buffer has been released NewReader returns ErrClosedPipe.
+	// WithBeforeLastByteFunc makes Reads hold back the newest byte and gates the last one on its hook.
 	NewReader(offset int) (io.ReadCloser, error)
 	// NewReadSeeker returns a ReadSeekCloser over the first length bytes of the stream from offset, e.g.
 	// for http.ServeContent. Reads block like NewReader's and return io.EOF at length; if the writer ends
 	// the stream short of length they return its error, or io.ErrUnexpectedEOF when it closed normally.
 	// Unlike NewReader the buffer stays alive until Close so the reader can rewind. A negative offset or
 	// length is an error; once the buffer has been released NewReadSeeker returns ErrClosedPipe.
+	// WithBeforeLastByteFunc gates these Reads like NewReader's; a length that stops short of the
+	// stream's last byte never waits for its hook.
 	NewReadSeeker(offset int, length int) (io.ReadSeekCloser, error)
 	// ReaderUsing returns the number of admitted readers still holding the stream: a NewReader until it
-	// returns its terminal error or is closed, a NewReadSeeker until it is closed.
+	// returns its terminal error or is closed, a NewReadSeeker until it is closed, plus the
+	// WithBeforeLastByteFunc hook's hold while it runs.
 	ReaderUsing() int
-	// TryClose releases the buffer if the writer has closed the stream and there are no active readers.
+	// TryClose releases the buffer if the stream is closed and nothing holds it (ReaderUsing() == 0).
 	// It returns false if the stream is still in use, and true once the buffer has been released;
 	// the error from the Buffer's Close and the after-close hook is reported by the call that released it,
 	// later calls return (true, nil).
@@ -74,6 +80,7 @@ type swmr struct {
 	autoClose       bool
 	beforeCloseFunc func()
 	afterCloseFunc  func(err error) error
+	beforeLastByte  func() error
 
 	chMut     sync.Mutex
 	readerChs map[chan struct{}]struct{}
@@ -104,6 +111,27 @@ func WithBeforeCloseFunc(f func()) Option {
 func WithAfterCloseFunc(f func(err error) error) Option {
 	return func(m *swmr) {
 		m.afterCloseFunc = f
+	}
+}
+
+// WithBeforeLastByteFunc gates the stream's last byte on f: readers hold back the newest byte while
+// the writer is open, and after a normal close (io.EOF) every reader reaching the last byte gets it
+// only if f returns nil, and f's error otherwise. r reads the whole stream, last byte included, and
+// is valid only while f runs. f runs exactly once per normally closed stream, empty ones included,
+// outside the internal locks: synchronously within the writer's Close, or within the first Read to
+// reach the last byte if that starts it first; the other waits for the same result, so Close returns
+// only once f has. The stream stays held while f runs, which ReaderUsing counts. If the writer closes
+// with another error, f never runs and readers get that error in place of the last byte. Closing a
+// reader does not interrupt f; its Read returns ErrClosedPipe once f returns. f must not read this
+// stream's last byte through NewReader or NewReadSeeker, as that would wait for its own result.
+// The writer's Close returns nil even if f fails. A nil f is ignored.
+func WithBeforeLastByteFunc(f func(r io.ReadSeeker) error) Option {
+	return func(m *swmr) {
+		if f != nil {
+			m.beforeLastByte = sync.OnceValue(func() error {
+				return f(io.NewSectionReader(m, 0, int64(m.Length())))
+			})
+		}
 	}
 }
 
@@ -147,6 +175,20 @@ func (m *swmr) Length() int {
 	return m.length
 }
 
+// available reports how many bytes a reader at off may read now, last when that is the gated last byte.
+func (m *swmr) available(off int) (avail int, done bool, last bool) {
+	// Loaded before Length: once the writer has closed, Length is final and m.err is safe to read.
+	done = m.isClosed.Load()
+	avail = m.Length() - off
+	if m.beforeLastByte != nil {
+		if done && avail == 1 {
+			return avail, done, true
+		}
+		avail--
+	}
+	return max(avail, 0), done, false
+}
+
 func (m *swmr) ReaderUsing() int {
 	return int(m.using.Load())
 }
@@ -161,7 +203,8 @@ func (m *swmr) TryClose() (bool, error) {
 		m.mut.Unlock()
 		return true, nil
 	}
-	if m.using.Load() != 0 || !m.isClosed.Load() {
+	// isClosed first: CloseWithError takes the hook's hold before publishing isClosed.
+	if !m.isClosed.Load() || m.using.Load() != 0 {
 		m.mut.Unlock()
 		return false, nil
 	}
@@ -353,7 +396,12 @@ func (w *writer) CloseWithError(err error) error {
 		m.chMut.Unlock()
 		return ErrClosedPipe
 	}
-	// Published under chMut: readers observe isClosed only under the same lock or via a closed channel.
+	runHook := err == io.EOF && m.beforeLastByte != nil
+	if runHook {
+		// Taken before isClosed is published, so it covers the hook whichever goroutine runs it.
+		m.using.Add(1)
+	}
+	// err is stored before isClosed, so any observer of isClosed (lock, closed channel, Load) sees err.
 	m.err = err
 	m.isClosed.Store(true)
 	for ch := range m.readerChs {
@@ -362,6 +410,11 @@ func (w *writer) CloseWithError(err error) error {
 	m.readerChs = make(map[chan struct{}]struct{})
 	m.chMut.Unlock()
 
+	if runHook {
+		// The hook's error is for the readers reaching the last byte, not for Close.
+		_ = m.beforeLastByte()
+		m.release()
+	}
 	if m.autoClose {
 		_, _ = m.TryClose()
 	}
@@ -380,21 +433,35 @@ func (m *reader) Read(p []byte) (n int, err error) {
 	if m.closed.Load() {
 		return 0, ErrClosedPipe
 	}
-	for m.off >= m.swmr.Length() {
-		_, ok := <-m.ch
-		if !ok {
+	avail, done, last := m.swmr.available(m.off)
+	for avail == 0 && !done {
+		if _, ok := <-m.ch; !ok && m.closed.Load() {
+			return 0, ErrClosedPipe
+		}
+		avail, done, last = m.swmr.available(m.off)
+	}
+	if avail == 0 {
+		m.release()
+		return 0, m.swmr.err
+	}
+	if last {
+		err = m.swmr.err
+		if err == io.EOF {
+			if len(p) == 0 {
+				return 0, nil
+			}
+			err = m.swmr.beforeLastByte()
 			if m.closed.Load() {
 				return 0, ErrClosedPipe
 			}
-			if m.off >= m.swmr.Length() {
-				m.release()
-				return 0, m.swmr.err
-			}
-			break
+		}
+		if err != nil {
+			m.release()
+			return 0, err
 		}
 	}
 
-	n, err = m.swmr.ReadAt(p, int64(m.off))
+	n, err = m.swmr.ReadAt(p[:min(len(p), avail)], int64(m.off))
 	if err == io.EOF {
 		if n != 0 {
 			err = nil
@@ -437,28 +504,36 @@ func (m *readSeeker) Read(p []byte) (n int, err error) {
 		return 0, io.EOF
 	}
 
-	for m.off >= m.swmr.Length() {
-		_, ok := <-m.ch
-		if !ok {
+	avail, done, last := m.swmr.available(m.off)
+	for avail == 0 && !done {
+		if _, ok := <-m.ch; !ok && m.closed.Load() {
+			return 0, ErrClosedPipe
+		}
+		avail, done, last = m.swmr.available(m.off)
+	}
+	if avail == 0 {
+		if m.swmr.err == io.EOF {
+			return 0, io.ErrUnexpectedEOF
+		}
+		return 0, m.swmr.err
+	}
+	if last {
+		err = m.swmr.err
+		if err == io.EOF {
+			if len(p) == 0 {
+				return 0, nil
+			}
+			err = m.swmr.beforeLastByte()
 			if m.closed.Load() {
 				return 0, ErrClosedPipe
 			}
-			if m.off >= m.swmr.Length() {
-				if m.swmr.err == io.EOF {
-					return 0, io.ErrUnexpectedEOF
-				}
-				return 0, m.swmr.err
-			}
-			break
+		}
+		if err != nil {
+			return 0, err
 		}
 	}
 
-	remaining := m.length - m.off
-	if len(p) > remaining {
-		p = p[:remaining]
-	}
-
-	n, err = m.swmr.ReadAt(p, int64(m.off))
+	n, err = m.swmr.ReadAt(p[:min(len(p), avail, m.length-m.off)], int64(m.off))
 	if err == io.EOF {
 		if n != 0 {
 			err = nil
